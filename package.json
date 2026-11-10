@@ -5,12 +5,21 @@
   "description": "Покер-рум для своих: холдем и Омаха на виртуальные фишки",
   "type": "module",
   "scripts": {
-    "test": "tsx --test test/*.test.ts",
+    "start": "node --disable-warning=ExperimentalWarning --import tsx src/server/index.ts",
+    "dev": "node --disable-warning=ExperimentalWarning --watch --import tsx src/server/index.ts",
+    "test": "node --disable-warning=ExperimentalWarning --import tsx --test test/*.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
-    "tsx": "^4.19.0",
-    "typescript": "^5.6.0",
-    "@types/node": "^22.0.0"
+    "@types/node": "^22.20.5",
+    "@types/ws": "^8.18.2",
+    "typescript": "^5.9.3"
+  },
+  "dependencies": {
+    "ws": "^8.22.2",
+    "tsx": "^4.23.15"
+  },
+  "engines": {
+    "node": ">=22.13"
   }
 }
