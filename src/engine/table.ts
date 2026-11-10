@@ -69,6 +69,25 @@ export class CashTable {
     this.seats = Array.from({ length: maxSeats }, () => null);
   }
 
+  /**
+   * Восстановить стол после перезапуска сервера: все игроки считаются отошедшими,
+   * их стеки сохранены и вернутся при посадке. Незавершённая раздача отменяется
+   * (стеки берутся на её начало).
+   */
+  static restore(
+    config: TableConfig,
+    rows: { userId: string; buyIn: number; stack: number; handsPlayed: number }[],
+    handNumber = 0,
+  ): CashTable {
+    const t = new CashTable(config);
+    for (const r of rows) {
+      t.ledger.set(r.userId, { buyIn: r.buyIn, handsPlayed: r.handsPlayed });
+      if (r.stack > 0) t.reserved.set(r.userId, r.stack);
+    }
+    t.handNumber = handNumber;
+    return t;
+  }
+
   get handInProgress(): boolean {
     return !!this.hand && !this.hand.isComplete;
   }
