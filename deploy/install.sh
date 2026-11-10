@@ -84,12 +84,19 @@ fi
 echo "$DOMAIN" > /etc/poker-room.domain
 
 say "Настраиваю адрес $DOMAIN"
-cat > /etc/caddy/Caddyfile <<EOF
+# У каждого сайта на сервере свой файл в /etc/caddy/sites — так на одном сервере уживаются несколько сайтов.
+mkdir -p /etc/caddy/sites
+if ! grep -q 'import /etc/caddy/sites/\*' /etc/caddy/Caddyfile 2>/dev/null; then
+  [ -f /etc/caddy/Caddyfile ] && cp /etc/caddy/Caddyfile /etc/caddy/Caddyfile.bak
+  echo 'import /etc/caddy/sites/*.caddy' > /etc/caddy/Caddyfile
+fi
+cat > /etc/caddy/sites/poker-room.caddy <<EOF
 $DOMAIN {
   encode gzip
   reverse_proxy 127.0.0.1:3000
 }
 EOF
+caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null
 
 cat > /etc/systemd/system/poker-room.service <<EOF
 [Unit]

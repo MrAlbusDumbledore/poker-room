@@ -33,6 +33,12 @@ curl -fsSL https://raw.githubusercontent.com/MrAlbusDumbledore/poker-room/main/d
 | База данных | `/var/lib/poker-room/poker.db` |
 | Резервные копии (каждый день, 14 последних) | `/var/lib/poker-room/backups` |
 | Настройки и код приглашения | `/etc/poker-room.env` |
+| Адрес сайта для веб-сервера | `/etc/caddy/sites/poker-room.caddy` |
+
+## Несколько сайтов на одном сервере
+
+Каждый сайт описывается своим файлом в `/etc/caddy/sites/`, поэтому на этом же сервере можно разместить и другие сайты:
+они не мешают покер-руму. После добавления файла выполните `systemctl reload caddy`.
 
 ## Полезные команды
 
