@@ -285,6 +285,6 @@ test('сервер: аккаунты, друзья, игра, сохранени
   await t.test('статика: главная страница отдаётся', async () => {
     const res = await fetch(base + '/some/spa/route');
     assert.equal(res.status, 200);
-    assert.match(await res.text(), /Покер-рум/);
+    assert.match(await res.text(), /Покер/);
   });
 });

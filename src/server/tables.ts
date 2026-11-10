@@ -429,6 +429,7 @@ export class TableManager {
       nextHandAt: lt.nextHandAt,
       commitment: t.currentCommitment,
       lastDeck: t.lastRevealedDeck,
+      serverNow: Date.now(),
       stats: t
         .stats()
         .map((r) => ({ ...r, displayName: name(r.userId) }))
