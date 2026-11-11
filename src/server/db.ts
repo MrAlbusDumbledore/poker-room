@@ -74,7 +74,18 @@ export function openDb(path: string): DB {
   // Нижний регистр с поддержкой кириллицы (встроенный LOWER в SQLite понимает только латиницу).
   db.function('ulower', { deterministic: true }, (s: unknown) => String(s ?? '').toLowerCase());
   db.exec(SCHEMA);
+  migrate(db);
   return db;
+}
+
+/** Добавление колонок в уже существующие базы (после обновления сайта). */
+function migrate(db: DB) {
+  const cols = new Set(
+    (db.prepare('PRAGMA table_info(table_ledger)').all() as { name: string }[]).map((c) => c.name),
+  );
+  // Место за столом и статус «отошёл» — чтобы после перезапуска сервера все остались на своих местах.
+  if (!cols.has('seat')) db.exec('ALTER TABLE table_ledger ADD COLUMN seat INTEGER');
+  if (!cols.has('sitting_out')) db.exec('ALTER TABLE table_ledger ADD COLUMN sitting_out INTEGER NOT NULL DEFAULT 0');
 }
 
 /** Выполнить функцию в транзакции. */

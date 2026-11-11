@@ -4,12 +4,14 @@
 #   curl -fsSL https://raw.githubusercontent.com/MrAlbusDumbledore/poker-room/main/deploy/install.sh | bash
 # Свой домен (необязательно):
 #   curl -fsSL .../install.sh | DOMAIN=poker.example.ru bash
-# Повторный запуск безопасен: обновит код и перезапустит сервис, данные не трогает.
+# После установки сайт обновляется сам: раз в 2 минуты проверяет GitHub (deploy/update.sh).
+# Повторный запуск безопасен: обновит настройки и код, данные игроков не трогает.
 set -euo pipefail
 
 REPO="${REPO:-https://github.com/MrAlbusDumbledore/poker-room.git}"
 BRANCH="${BRANCH:-main}"
-APP_DIR=/opt/poker-room
+ROOT=/opt/poker
+OLD_APP_DIR=/opt/poker-room   # раскладка первых версий установщика
 DATA_DIR=/var/lib/poker-room
 ENV_FILE=/etc/poker-room.env
 DOMAIN="${DOMAIN:-}"
@@ -42,15 +44,14 @@ if ! command -v caddy >/dev/null; then
   apt-get install -y caddy
 fi
 
-say "Скачиваю код покер-рума"
-if [ -d "$APP_DIR/.git" ]; then
-  git -C "$APP_DIR" fetch --depth 1 origin "$BRANCH"
-  git -C "$APP_DIR" reset --hard "origin/$BRANCH"
-else
-  git clone --depth 1 --branch "$BRANCH" "$REPO" "$APP_DIR"
+say "Подключаю репозиторий с кодом"
+mkdir -p "$ROOT/releases"
+if [ ! -d "$ROOT/repo/.git" ]; then
+  git init -q "$ROOT/repo"
+  git -C "$ROOT/repo" remote add origin "$REPO"
 fi
-cd "$APP_DIR"
-npm ci --omit=dev --no-audit --no-fund
+git -C "$ROOT/repo" remote set-url origin "$REPO"
+git -C "$ROOT/repo" fetch -q --depth 1 origin "$BRANCH"
 
 say "Настраиваю пользователя и папку для данных"
 id poker >/dev/null 2>&1 || useradd --system --home-dir "$DATA_DIR" --shell /usr/sbin/nologin poker
@@ -106,7 +107,7 @@ After=network.target
 [Service]
 User=poker
 Group=poker
-WorkingDirectory=$APP_DIR
+WorkingDirectory=$ROOT/current
 EnvironmentFile=$ENV_FILE
 ExecStart=/usr/bin/node --disable-warning=ExperimentalWarning --import tsx src/server/index.ts
 Restart=always
@@ -119,6 +120,30 @@ PrivateTmp=true
 
 [Install]
 WantedBy=multi-user.target
+EOF
+
+# Автообновление: раз в 2 минуты проверяем GitHub
+cat > /etc/systemd/system/poker-room-update.service <<EOF
+[Unit]
+Description=Автообновление покер-рума
+After=network-online.target
+
+[Service]
+Type=oneshot
+Environment=BRANCH=$BRANCH
+ExecStart=/bin/bash $ROOT/current/deploy/update.sh
+EOF
+
+cat > /etc/systemd/system/poker-room-update.timer <<EOF
+[Unit]
+Description=Проверка обновлений покер-рума раз в 2 минуты
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=2min
+
+[Install]
+WantedBy=timers.target
 EOF
 
 # Ежедневная копия базы (безопасно на ходу, через VACUUM INTO), хранятся последние 14
@@ -144,9 +169,16 @@ fi
 say "Запускаю"
 systemctl daemon-reload
 systemctl enable poker-room >/dev/null
-systemctl restart poker-room
+# Готовим текущую версию и запускаем сайт (тот же механизм, что у автообновления)
+git -C "$ROOT/repo" show "origin/$BRANCH:deploy/update.sh" > /tmp/poker-room-update.sh
+POKER_IN_INSTALL=1 BRANCH="$BRANCH" bash /tmp/poker-room-update.sh --now
+rm -f /tmp/poker-room-update.sh
+sha256sum "$ROOT/current/deploy/install.sh" | cut -d' ' -f1 > /etc/poker-room.installer
+systemctl enable --now poker-room-update.timer >/dev/null
 systemctl enable caddy >/dev/null
 systemctl restart caddy
+# Старая раскладка папок больше не нужна
+[ -d "$OLD_APP_DIR" ] && rm -rf "$OLD_APP_DIR"
 
 for i in $(seq 1 20); do
   if curl -fsS http://127.0.0.1:3000/api/config >/dev/null 2>&1; then break; fi
@@ -164,4 +196,4 @@ echo "Адрес сайта:       https://$DOMAIN"
 echo "Код приглашения:   $CODE"
 echo
 echo "Первое открытие может занять до минуты — сервер получает HTTPS-сертификат."
-echo "Обновить сайт после новых изменений: запустите эту же команду ещё раз."
+echo "Сайт обновляется сам: после того как вы вольёте изменения на GitHub, через 2–3 минуты они появятся на сайте."

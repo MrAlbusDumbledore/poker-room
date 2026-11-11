@@ -38,6 +38,8 @@ export interface ManagerOptions {
   actionTimeOverrideMs?: number;
   /** Множитель паузы на раскладку (в тестах 0, чтобы не ждать). */
   runoutScale: number;
+  /** Через сколько мс без связи игрок пересаживается в «отошёл» (по умолчанию AWAY_AFTER_MS). */
+  awayAfterMs?: number;
 }
 
 export type TableCommand =
@@ -88,7 +90,14 @@ interface LiveTable {
   nextHandAt: number | null;
   savedHand: unknown;
   closing: boolean;
+  /** Когда стол загружен в память (после запуска сервера). */
+  loadedAt: number;
+  /** Когда игрок последний раз был на связи (если сейчас отключён). */
+  lastSeen: Map<string, number>;
 }
+
+/** Игрок, отключившийся дольше этого, перед новой раздачей пересаживается в «отошёл». */
+export const AWAY_AFTER_MS = 30_000;
 
 export interface CreateTableInput {
   name?: unknown;
@@ -231,10 +240,19 @@ export class TableManager {
       buy_in: number;
       stack: number;
       hands_played: number;
+      seat: number | null;
+      sitting_out: number;
     }[];
     const table = CashTable.restore(
       configOf(row),
-      ledger.map((r) => ({ userId: r.user_id, buyIn: r.buy_in, stack: r.stack, handsPlayed: r.hands_played })),
+      ledger.map((r) => ({
+        userId: r.user_id,
+        buyIn: r.buy_in,
+        stack: r.stack,
+        handsPlayed: r.hands_played,
+        seat: r.seat,
+        sittingOut: !!r.sitting_out,
+      })),
       row.hand_number,
     );
     const lt: LiveTable = {
@@ -248,6 +266,8 @@ export class TableManager {
       nextHandAt: null,
       savedHand: null,
       closing: false,
+      loadedAt: Date.now(),
+      lastSeen: new Map(),
     };
     this.live.set(id, lt);
     return lt;
@@ -256,14 +276,34 @@ export class TableManager {
   subscribe(id: string, sub: Subscriber) {
     const lt = this.load(id);
     lt.subs.add(sub);
-    this.broadcast(lt);
+    lt.lastSeen.delete(sub.userId);
+    this.afterChange(lt);
   }
 
   unsubscribe(id: string, sub: Subscriber) {
     const lt = this.live.get(id);
     if (!lt) return;
     lt.subs.delete(sub);
+    if (![...lt.subs].some((s) => s.userId === sub.userId)) lt.lastSeen.set(sub.userId, Date.now());
     this.broadcast(lt);
+  }
+
+  /** Сколько раздач идёт прямо сейчас (для автообновления: перезапускаемся только в паузе). */
+  activeHands(): number {
+    let n = 0;
+    for (const lt of this.live.values()) if (lt.table.handInProgress) n++;
+    return n;
+  }
+
+  /** Перед раздачей отсаживаем тех, кто давно отключился, чтобы не ждать их ход. */
+  private sitOutDisconnected(lt: LiveTable) {
+    const now = Date.now();
+    const online = new Set([...lt.subs].map((s) => s.userId));
+    for (const s of lt.table.seats) {
+      if (!s || s.sittingOut || online.has(s.userId)) continue;
+      const since = lt.lastSeen.get(s.userId) ?? lt.loadedAt;
+      if (now - since > (this.opts.awayAfterMs ?? AWAY_AFTER_MS)) s.sittingOut = true;
+    }
   }
 
   command(id: string, user: User, cmd: TableCommand) {
@@ -335,7 +375,10 @@ export class TableManager {
       lt.nextHandTimer = setTimeout(() => {
         lt.nextHandTimer = null;
         lt.nextHandAt = null;
-        if (!lt.table.closed && lt.table.canStartHand() && !lt.closing) lt.table.startHand();
+        if (!lt.table.closed && !lt.closing) {
+          this.sitOutDisconnected(lt);
+          if (lt.table.canStartHand()) lt.table.startHand();
+        }
         this.afterChange(lt);
       }, delay);
     } else if ((t.handInProgress || !t.canStartHand()) && lt.nextHandTimer) {
@@ -386,11 +429,14 @@ export class TableManager {
     const stats = lt.table.stats();
     tx(this.db, () => {
       const up = this.db.prepare(
-        `INSERT INTO table_ledger (table_id, user_id, buy_in, stack, hands_played) VALUES (?, ?, ?, ?, ?)
+        `INSERT INTO table_ledger (table_id, user_id, buy_in, stack, hands_played, seat, sitting_out)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT (table_id, user_id) DO UPDATE SET buy_in = excluded.buy_in, stack = excluded.stack,
-         hands_played = excluded.hands_played`,
+         hands_played = excluded.hands_played, seat = excluded.seat, sitting_out = excluded.sitting_out`,
       );
-      for (const s of stats) up.run(lt.row.id, s.userId, s.buyIn, s.stack, s.handsPlayed);
+      for (const s of stats) {
+        up.run(lt.row.id, s.userId, s.buyIn, s.stack, s.handsPlayed, s.seat, s.status === 'sitting_out' ? 1 : 0);
+      }
       this.db.prepare('UPDATE poker_tables SET hand_number = ? WHERE id = ?').run(lt.table.handNumber, lt.row.id);
     });
   }
