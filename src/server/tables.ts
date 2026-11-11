@@ -36,6 +36,8 @@ export interface ManagerOptions {
   showdownDelayMs: number;
   /** Только для тестов: время на ход в мс вместо настроек стола. */
   actionTimeOverrideMs?: number;
+  /** Множитель паузы на раскладку (в тестах 0, чтобы не ждать). */
+  runoutScale: number;
 }
 
 export type TableCommand =
@@ -46,6 +48,34 @@ export type TableCommand =
   | { t: 'add_chips'; amount: number }
   | { t: 'action'; action: ActionInput }
   | { t: 'close' };
+
+/**
+ * Темп раскладки стола после олл-ина. Сервер отправляет эти значения в интерфейс,
+ * чтобы паузы на сервере и анимация в браузере совпадали.
+ */
+export const RUNOUT_TIMING = {
+  /** Пауза после открытия карт игроков, до первой карты стола. */
+  revealMs: 1200,
+  /** Между картами флопа. */
+  flopCardMs: 350,
+  /** Перед тёрном и перед ривером. */
+  streetMs: 1800,
+  /** После последней карты, до показа итогов. */
+  resultMs: 800,
+};
+
+/** Сколько длится раскладка в интерфейсе, если на столе было `from` карт. */
+export function runoutDuration(from: number | null): number {
+  if (from === null || from >= 5) return 0;
+  const T = RUNOUT_TIMING;
+  let t = T.revealMs;
+  let last = t;
+  for (let c = from; c < 5; c++) {
+    last = t;
+    t += c < 2 ? T.flopCardMs : T.streetMs;
+  }
+  return last + T.resultMs;
+}
 
 interface LiveTable {
   row: TableRow;
@@ -297,7 +327,10 @@ export class TableManager {
 
     // Автостарт следующей раздачи
     if (!t.handInProgress && t.canStartHand() && !lt.nextHandTimer) {
-      const delay = t.lastHand?.result?.showdown ? this.opts.showdownDelayMs : this.opts.handDelayMs;
+      const last = t.lastHand;
+      const delay = last?.result?.showdown
+        ? this.opts.showdownDelayMs + this.opts.runoutScale * runoutDuration(last.runoutFrom)
+        : this.opts.handDelayMs;
       lt.nextHandAt = Date.now() + delay;
       lt.nextHandTimer = setTimeout(() => {
         lt.nextHandTimer = null;
@@ -430,6 +463,7 @@ export class TableManager {
       commitment: t.currentCommitment,
       lastDeck: t.lastRevealedDeck,
       serverNow: Date.now(),
+      runoutTiming: RUNOUT_TIMING,
       stats: t
         .stats()
         .map((r) => ({ ...r, displayName: name(r.userId) }))
