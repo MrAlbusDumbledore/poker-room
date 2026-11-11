@@ -70,19 +70,24 @@ export class CashTable {
   }
 
   /**
-   * Восстановить стол после перезапуска сервера: все игроки считаются отошедшими,
-   * их стеки сохранены и вернутся при посадке. Незавершённая раздача отменяется
-   * (стеки берутся на её начало).
+   * Восстановить стол после перезапуска сервера. Игроки, сидевшие за столом, садятся на свои места
+   * с теми же стеками; остальные считаются отошедшими, их стеки сохранены.
+   * Незавершённая раздача отменяется (стеки берутся на её начало).
    */
   static restore(
     config: TableConfig,
-    rows: { userId: string; buyIn: number; stack: number; handsPlayed: number }[],
+    rows: { userId: string; buyIn: number; stack: number; handsPlayed: number; seat?: number | null; sittingOut?: boolean }[],
     handNumber = 0,
   ): CashTable {
     const t = new CashTable(config);
     for (const r of rows) {
       t.ledger.set(r.userId, { buyIn: r.buyIn, handsPlayed: r.handsPlayed });
-      if (r.stack > 0) t.reserved.set(r.userId, r.stack);
+      const seat = r.seat ?? null;
+      if (seat !== null && seat >= 0 && seat < t.seats.length && !t.seats[seat] && r.stack > 0) {
+        t.seats[seat] = { userId: r.userId, stack: r.stack, sittingOut: !!r.sittingOut, leaveAfterHand: false };
+      } else if (r.stack > 0) {
+        t.reserved.set(r.userId, r.stack);
+      }
     }
     t.handNumber = handNumber;
     return t;

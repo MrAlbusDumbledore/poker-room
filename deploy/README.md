@@ -23,13 +23,20 @@ curl -fsSL https://raw.githubusercontent.com/MrAlbusDumbledore/poker-room/main/d
 
 ## Обновление
 
-Та же команда установки: она скачает новый код и перезапустит сайт. Данные игроков не трогаются.
+Сайт обновляется сам. Раз в 2 минуты сервер проверяет GitHub, и если в ветке `main` появилась новая версия:
+
+1. готовит её в отдельной папке (`/opt/poker/releases/…`), не трогая работающий сайт;
+2. ждёт момента, когда ни за одним столом не идёт раздача;
+3. переключается на новую версию — перезапуск занимает пару секунд, игроки остаются на своих местах.
+
+Журнал обновлений: `journalctl -u poker-room-update -n 50`.
+Обновить вручную прямо сейчас: `bash /opt/poker/current/deploy/update.sh`.
 
 ## Где что лежит
 
 | Что | Где |
 | --- | --- |
-| Код | `/opt/poker-room` |
+| Код текущей версии | `/opt/poker/current` (ссылка на папку в `/opt/poker/releases`) |
 | База данных | `/var/lib/poker-room/poker.db` |
 | Резервные копии (каждый день, 14 последних) | `/var/lib/poker-room/backups` |
 | Настройки и код приглашения | `/etc/poker-room.env` |
@@ -44,6 +51,7 @@ curl -fsSL https://raw.githubusercontent.com/MrAlbusDumbledore/poker-room/main/d
 
 ```bash
 systemctl status poker-room            # работает ли сайт
+systemctl list-timers poker-room-update   # когда следующая проверка обновлений
 journalctl -u poker-room -n 100        # журнал сайта
 systemctl restart poker-room           # перезапуск
 grep REGISTRATION_CODE /etc/poker-room.env   # посмотреть код приглашения

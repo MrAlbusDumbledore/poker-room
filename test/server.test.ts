@@ -255,18 +255,26 @@ test('сервер: аккаунты, друзья, игра, сохранени
       c.send({ t: 'join', tableId });
       await c.waitFor((m) => m.t === 'state');
     }
-    // После перезапуска все игроки «отошли», стеки сохранены
+    // После перезапуска все остались на своих местах с теми же стеками
     const st = await alice.nextState(() => true);
-    assert.equal(st.me.seat, null);
-    assert.ok(st.me.reservedStack > 0, 'стек восстановлен из базы после перезапуска');
+    assert.equal(st.me.seat, 0, 'Алиса снова на своём месте');
+    const names = st.seats.filter((x: any) => !x.empty).map((x: any) => `${x.seat}:${x.displayName}`).sort();
+    assert.deepEqual(names, ['0:Алиса', '3:Кэрол', '5:Боб']);
     const before = st.stats.reduce((a: number, r: any) => a + r.stack, 0);
-    alice.send({ t: 'sit', seat: 0 });
-    bob.send({ t: 'sit', seat: 1 });
+    for (const c of [alice, bob, carol]) c.send({ t: 'sit_in' });
     // никто не ходит — таймер сбрасывает карты и сажает игроков в «отошёл»
-    const idle = await alice.nextState((x) => !x.handInProgress && x.handNumber > st.handNumber && x.seats.some((s: any) => !s.empty && s.sittingOut), 5000);
+    const idle = await alice.nextState((x) => !x.handInProgress && x.handNumber > st.handNumber && x.seats.some((s: any) => !s.empty && s.sittingOut), 8000);
     assert.ok(idle);
     const afterSum = idle.stats.reduce((a: number, r: any) => a + r.stack, 0);
     assert.equal(afterSum, before, 'фишки не теряются');
+  });
+
+  await t.test('служебная проверка занятости доступна только с самого сервера', async () => {
+    const local = await fetch(base + '/api/internal/busy');
+    assert.equal(local.status, 200);
+    assert.equal(typeof (await local.json()).handsInProgress, 'number');
+    const proxied = await fetch(base + '/api/internal/busy', { headers: { 'X-Forwarded-For': '8.8.8.8' } });
+    assert.equal(proxied.status, 404, 'через прокси (то есть из интернета) — недоступно');
   });
 
   await t.test('закрытие стола: итоговая статистика', async () => {

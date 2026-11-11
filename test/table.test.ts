@@ -153,3 +153,24 @@ test('длинная сессия: статистика сходится в но
   assert.ok(stats.every((x) => x.stack >= 0));
   assert.throws(() => t.sit('z', 0, 1000), /закрыт/);
 });
+
+test('восстановление после перезапуска: игроки на своих местах, ушедшие — со сохранённым стеком', () => {
+  const cfg = { variant: 'NLH' as const, maxSeats: 6, smallBlind: 10, bigBlind: 20, minBuyIn: 400, maxBuyIn: 4000 };
+  const t = CashTable.restore(
+    cfg,
+    [
+      { userId: 'a', buyIn: 1000, stack: 1200, handsPlayed: 5, seat: 2, sittingOut: false },
+      { userId: 'b', buyIn: 1000, stack: 800, handsPlayed: 5, seat: 4, sittingOut: true },
+      { userId: 'c', buyIn: 1000, stack: 1000, handsPlayed: 3, seat: null },
+      { userId: 'd', buyIn: 500, stack: 0, handsPlayed: 2, seat: 1 },
+    ],
+    10,
+  );
+  assert.equal(t.seats[2]!.userId, 'a');
+  assert.equal(t.seats[2]!.stack, 1200);
+  assert.equal(t.seats[4]!.sittingOut, true);
+  assert.equal(t.reserved.get('c'), 1000);
+  assert.equal(t.seats[1], null, 'игрок без фишек не занимает место');
+  assert.equal(t.handNumber, 10);
+  assert.equal(t.stats().reduce((s, r) => s + r.net, 0), 1200 + 800 + 1000 + 0 - 3500);
+});

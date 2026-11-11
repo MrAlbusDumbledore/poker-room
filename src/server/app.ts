@@ -147,6 +147,18 @@ export function createApp(opts: AppOptions): App {
   router.add('POST', '/api/tables', (ctx) => ({ table: summary(tables.create(me(ctx), ctx.body)) }));
   router.add('GET', '/api/tables/:id/stats', (ctx) => tables.stats(ctx.params.id));
 
+  // Служебная проверка для автообновления: доступна только с самого сервера, не через интернет.
+  router.add(
+    'GET',
+    '/api/internal/busy',
+    (ctx) => {
+      const local = ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(ctx.req.socket.remoteAddress ?? '');
+      if (!local || ctx.req.headers['x-forwarded-for']) throw new HttpError(404, 'Не найдено');
+      return { handsInProgress: tables.activeHands() };
+    },
+    { auth: false },
+  );
+
   // ---------- HTTP-сервер ----------
 
   const server = createServer(async (req, res) => {
