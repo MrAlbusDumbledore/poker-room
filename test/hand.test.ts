@@ -213,3 +213,24 @@ test('случайная симуляция: фишки не теряются и
     assert.ok(h.players.every((p) => p.stack >= 0));
   }
 });
+
+test('раскладка после олл-ина: движок помнит, с какой улицы она началась', () => {
+  const pre = three([100, 300, 500]);
+  pre.act('a', { type: 'allin' });
+  pre.act('b', { type: 'allin' });
+  pre.act('c', { type: 'call' });
+  assert.equal(pre.runoutFrom, 0, 'олл-ин до флопа — раскладываем все 5 карт');
+
+  const flop = three([1000, 1000, 1000]);
+  flop.act('a', { type: 'call' });
+  flop.act('b', { type: 'call' });
+  flop.act('c', { type: 'check' });
+  flop.act('b', { type: 'allin' });
+  flop.act('c', { type: 'allin' });
+  flop.act('a', { type: 'fold' });
+  assert.equal(flop.runoutFrom, 3, 'олл-ин на флопе — раскладываем тёрн и ривер');
+
+  const normal = three();
+  checkDown(normal);
+  assert.equal(normal.runoutFrom, null, 'обычная раздача без олл-ина — раскладки нет');
+});

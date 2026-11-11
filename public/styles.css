@@ -183,6 +183,12 @@ a { color: var(--brass); }
 .card.slot { background: transparent; border: 1.5px dashed rgba(242, 239, 232, 0.18); box-shadow: none; }
 .card.dim { filter: brightness(0.55); }
 .card.win { box-shadow: 0 0 0 2px var(--brass); }
+/* Карта стола появляется: переворот из рубашки */
+.card.deal { animation: deal 0.32s ease-out; }
+@keyframes deal {
+  from { transform: translateY(-10px) rotateY(80deg); opacity: 0; }
+  to { transform: none; opacity: 1; }
+}
 
 /* ---------- Экран стола ---------- */
 .game { height: 100dvh; display: flex; flex-direction: column; overflow: hidden; }

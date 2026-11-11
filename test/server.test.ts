@@ -15,6 +15,7 @@ const baseOpts: AppOptions = {
   registrationCode: 'friends',
   handDelayMs: 30,
   showdownDelayMs: 30,
+  runoutScale: 0,
 };
 
 let app: App;
@@ -287,4 +288,13 @@ test('сервер: аккаунты, друзья, игра, сохранени
     assert.equal(res.status, 200);
     assert.match(await res.text(), /Покер/);
   });
+});
+
+test('длительность раскладки', async () => {
+  const { runoutDuration } = await import('../src/server/tables.js');
+  assert.equal(runoutDuration(null), 0);
+  // префлоп: 1200 → флоп 1200/1550/1900 → тёрн 3700 → ривер 5500 → итог 6300
+  assert.equal(runoutDuration(0), 6300);
+  assert.equal(runoutDuration(3), 1200 + 1800 + 800);
+  assert.equal(runoutDuration(4), 1200 + 800);
 });

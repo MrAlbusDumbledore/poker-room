@@ -107,6 +107,11 @@ export class Hand {
   toAct = -1;
   events: HandEvent[] = [];
   result: HandResult | null = null;
+  /**
+   * Если торговля закончилась олл-ином до ривера — сколько карт было на столе в этот момент
+   * (0 — префлоп, 3 — флоп, 4 — тёрн). null — раскладки не было.
+   */
+  runoutFrom: number | null = null;
 
   private readonly deck: Card[];
   private deckPos = 0;
@@ -338,6 +343,7 @@ export class Hand {
       this.lastRaiseSize = this.bigBlind;
 
       if (this.street === 'river') return this.finishShowdown();
+      const before = this.board.length;
       this.dealNextStreet();
 
       const actors = this.live().filter((p) => !p.allIn);
@@ -347,6 +353,8 @@ export class Hand {
         return;
       }
       // Торговаться некому — докладываем стол до ривера.
+      // Запоминаем, с какой карты началась раскладка: интерфейс откроет её постепенно.
+      if (this.runoutFrom === null) this.runoutFrom = before;
     }
   }
 
@@ -461,6 +469,7 @@ export class Hand {
         hole: p.id === viewerId || shown.has(p.id) ? p.hole.slice() : null,
       })),
       legal: this.activePlayerId === viewerId ? this.getLegalActions() : null,
+      runoutFrom: this.runoutFrom,
       result: this.result,
     };
   }

@@ -35,6 +35,8 @@ export interface AppOptions {
   handDelayMs?: number;
   showdownDelayMs?: number;
   actionTimeOverrideMs?: number;
+  /** Множитель паузы на раскладку стола после олл-ина (по умолчанию 1). */
+  runoutScale?: number;
 }
 
 export interface App {
@@ -50,6 +52,7 @@ export function createApp(opts: AppOptions): App {
     handDelayMs: opts.handDelayMs ?? 2000,
     showdownDelayMs: opts.showdownDelayMs ?? 5000,
     actionTimeOverrideMs: opts.actionTimeOverrideMs,
+    runoutScale: opts.runoutScale ?? 1,
   });
   const auth = (cookies: Record<string, string>) => userBySession(db, cookies[SESSION_COOKIE]);
   const router = new Router(auth, !!opts.trustProxy);

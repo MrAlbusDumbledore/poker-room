@@ -40,6 +40,59 @@ export function tableScreen(root, tableId, app) {
   let raf = 0;
   let lastTurnKey = '';
 
+  // Постепенное открытие карт стола. shown — сколько карт борда сейчас видно;
+  // results — показывать ли итоги (во время раскладки после олл-ина они скрыты, чтобы можно было поболеть).
+  let anim = { hand: -1, shown: 0, results: true, fresh: '', timers: [] };
+
+  function stopAnim() {
+    anim.timers.forEach(clearTimeout);
+    anim.timers = [];
+  }
+
+  function syncAnim(prev) {
+    const hand = st.hand;
+    const board = hand?.board ?? [];
+    if (!prev || anim.hand !== st.handNumber) {
+      stopAnim();
+      // Открыли стол посреди раздачи — показываем как есть; новая раздача — с пустого стола.
+      anim = { hand: st.handNumber, shown: prev ? 0 : board.length, results: true, fresh: '', timers: [] };
+    }
+    if (anim.timers.length) return; // раскладка уже идёт
+    if (board.length < anim.shown) anim.shown = board.length;
+    if (board.length === anim.shown) return;
+
+    const T = st.runoutTiming;
+    const from = anim.shown;
+    const r = hand.runoutFrom;
+    const runout = !!hand.result?.showdown && r !== null && r !== undefined && from <= r && board.length > r;
+    const at = (ms, fn) =>
+      anim.timers.push(
+        setTimeout(() => {
+          fn();
+          draw();
+        }, ms),
+      );
+
+    if (runout) anim.results = false;
+    let t = runout ? T.revealMs : 0;
+    let last = 0;
+    for (let c = from; c < board.length; c++) {
+      last = t;
+      at(t, () => {
+        anim.shown = c + 1;
+        anim.fresh = board[c];
+        if (runout && c >= 3) navigator.vibrate?.(30);
+      });
+      // Флоп — карта за картой; перед тёрном и ривером при раскладке — пауза.
+      t += c < 2 ? T.flopCardMs : runout ? T.streetMs : T.flopCardMs;
+    }
+    at(last + (runout ? T.resultMs : 400), () => {
+      anim.timers = [];
+      anim.results = true;
+      anim.fresh = '';
+    });
+  }
+
   const top = h('header.game-top');
   const arena = h('div.arena');
   const dock = h('div.dock');
@@ -49,7 +102,9 @@ export function tableScreen(root, tableId, app) {
   const sock = new TableSocket(tableId, {
     onState: (s) => {
       clockOffset = s.serverNow - Date.now();
+      const prev = st;
       st = s;
+      syncAnim(prev);
       draw();
     },
     onError: (m) => toast(m, true),
@@ -105,7 +160,7 @@ export function tableScreen(root, tableId, app) {
     const result = hand?.result;
     const live = st.handInProgress;
     const showdown = !!result?.showdown;
-    const winners = new Set(result ? Object.keys(result.collected) : []);
+    const winners = new Set(result && anim.results ? Object.keys(result.collected) : []);
 
     const els = [h('div.felt')];
 
@@ -125,7 +180,9 @@ export function tableScreen(root, tableId, app) {
       const isMe = s.userId === me.userId;
       const active = live && hand.activePlayerId === s.userId;
       const folded = p?.folded;
-      const tag = s.leaving ? 'уходит' : s.sittingOut ? 'отошёл' : !s.online ? 'не в сети' : p?.allIn && live ? 'олл-ин' : folded && live ? 'фолд' : '';
+      // Пока идёт раскладка, не выдаём исход: проигравший с нулём ещё не «отошёл», он в олл-ине
+      const running = !anim.results && !!p;
+      const tag = running && p.allIn ? 'олл-ин' : s.leaving ? 'уходит' : s.sittingOut && !running ? 'отошёл' : !s.online ? 'не в сети' : p?.allIn && live ? 'олл-ин' : folded && live ? 'фолд' : '';
 
       // Карты над табличкой: у соперников рубашки, на вскрытии — открытые
       let mini = null;
@@ -141,7 +198,7 @@ export function tableScreen(root, tableId, app) {
       }
 
       let res = null;
-      if (result && p && !live) {
+      if (result && p && !live && anim.results) {
         const net = result.net[s.userId] ?? 0;
         const combo = showdown ? result.hands[s.userId]?.name : null;
         if (net || combo) res = h('div.result', { class: net < 0 ? 'lost' : '' }, net > 0 ? `+${fmt(net)}` : net < 0 ? fmt(net) : '', combo ? h('div', {}, combo) : null);
@@ -150,13 +207,14 @@ export function tableScreen(root, tableId, app) {
       els.push(
         h(
           'div.seat',
-          { class: [active && 'active', folded && live && 'folded', (s.sittingOut || s.leaving) && 'away', isMe && 'me'].filter(Boolean).join(' '), style: pos },
+          { class: [active && 'active', folded && live && 'folded', ((s.sittingOut && !running) || s.leaving) && 'away', isMe && 'me'].filter(Boolean).join(' '), style: pos },
           mini,
           h(
             'div.plate',
             {},
             h('div.who', {}, s.displayName),
-            h('div.stack.num', {}, fmt(s.stack)),
+            // Во время раскладки показываем стек до раздачи банка, чтобы не выдать победителя
+            h('div.stack.num', {}, fmt(!anim.results && result ? s.stack - (result.collected[s.userId] ?? 0) : s.stack)),
             tag ? h('div.tag', {}, tag) : null,
             active ? h('div.timer', { dataset: { timer: '1' } }) : null,
           ),
@@ -175,13 +233,13 @@ export function tableScreen(root, tableId, app) {
     }
 
     // Центр: борд, банк, статус
-    const board = hand?.board ?? [];
-    const win = new Set(showdown ? Object.entries(result.hands).filter(([id]) => winners.has(id)).flatMap(([, v]) => v.cards) : []);
+    const board = (hand?.board ?? []).slice(0, anim.shown);
+    const win = new Set(showdown && anim.results ? Object.entries(result.hands).filter(([id]) => winners.has(id)).flatMap(([, v]) => v.cards) : []);
     els.push(
       h(
         'div.center',
         {},
-        h('div.board', { 'aria-label': 'Карты на столе' }, Array.from({ length: 5 }, (_, i) => (board[i] ? cardEl(board[i], win.has(board[i]) ? 'win' : '') : slotEl()))),
+        h('div.board', { 'aria-label': 'Карты на столе' }, Array.from({ length: 5 }, (_, i) => (board[i] ? cardEl(board[i], [win.has(board[i]) && 'win', board[i] === anim.fresh && 'deal'].filter(Boolean).join(' ')) : slotEl()))),
         hand ? h('div.pot.num', {}, fmt(hand.pot), h('small', {}, live ? STREET[hand.street] : 'банк')) : null,
         h('div.status-line', { dataset: { status: '1' } }),
       ),
@@ -210,7 +268,7 @@ export function tableScreen(root, tableId, app) {
     // Мои карты; на вскрытии подсвечиваем те, что вошли в выигрышную комбинацию
     const showMine = !!myP?.hole;
     const res = hand?.result;
-    const myWin = new Set(res?.showdown && res.collected[me.userId] ? res.hands[me.userId]?.cards ?? [] : []);
+    const myWin = new Set(anim.results && res?.showdown && res.collected[me.userId] ? res.hands[me.userId]?.cards ?? [] : []);
     const omaha = (hand?.variant ?? st.table.variant) === 'PLO5';
     parts.push(
       h(
@@ -219,7 +277,7 @@ export function tableScreen(root, tableId, app) {
         showMine ? myP.hole.map((c) => cardEl(c, myP.folded && st.handInProgress ? 'dim' : myWin.has(c) ? 'win' : '')) : h('span.label', {}, mySeat.sittingOut ? 'Ты отошёл от стола' : 'Ждём следующую раздачу'),
       ),
     );
-    const combo = showMine && !myP.folded ? currentCombo(hand.variant, myP.hole, hand.board) : null;
+    const combo = showMine && !myP.folded ? currentCombo(hand.variant, myP.hole, hand.board.slice(0, anim.shown)) : null;
     parts.push(h('div.combo', {}, combo ?? (myP?.folded && st.handInProgress ? 'Ты сбросил карты' : '')));
 
     if (legal) {
@@ -326,6 +384,7 @@ export function tableScreen(root, tableId, app) {
 
   function statusText(t) {
     const hand = st.hand;
+    if (!anim.results) return 'Олл-ин! Открываем карты';
     if (st.table.closing) return 'Стол закроется после этой раздачи';
     if (st.handInProgress && hand.activePlayerId) {
       const sec = st.actionDeadline ? Math.ceil(Math.max(0, st.actionDeadline - t) / 1000) : '';
@@ -440,6 +499,7 @@ export function tableScreen(root, tableId, app) {
   }
 
   return () => {
+    stopAnim();
     cancelAnimationFrame(raf);
     sock.stop();
     document.title = 'Покер для своих';
