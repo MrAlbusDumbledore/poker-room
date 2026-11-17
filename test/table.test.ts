@@ -174,3 +174,27 @@ test('восстановление после перезапуска: игрок
   assert.equal(t.handNumber, 10);
   assert.equal(t.stats().reduce((s, r) => s + r.net, 0), 1200 + 800 + 1000 + 0 - 3500);
 });
+
+test('режим с балансом: встал — фишки сразу уходят на баланс; закрытие стола забирает все стеки', () => {
+  const t = table();
+  const wallet: Record<string, number> = {};
+  t.onCashOut = (id, amount) => (wallet[id] = (wallet[id] ?? 0) + amount);
+  t.sit('a', 0, 1000);
+  t.sit('b', 1, 1000);
+  t.startHand();
+  t.act(t.hand!.activePlayerId!, { type: 'fold' });
+  const aStack = t.seats[0]!.stack;
+  t.leave('a');
+  assert.equal(wallet.a, aStack, 'стек Алисы на балансе');
+  assert.equal(t.reserved.size, 0, 'ничего не «заморожено»');
+  const rowA = t.stats().find((r) => r.userId === 'a')!;
+  assert.equal(rowA.cashOut, aStack);
+  assert.equal(rowA.net, aStack - 1000);
+  t.sit('a', 2, 500);
+  assert.equal(t.stats().find((r) => r.userId === 'a')!.buyIn, 1500, 'новая посадка — новая покупка');
+  const stacks = t.seats.filter(Boolean).reduce((s, x) => s + x!.stack, 0);
+  const before = Object.values(wallet).reduce((x, y) => x + y, 0);
+  const final = t.close();
+  assert.equal(Object.values(wallet).reduce((x, y) => x + y, 0), before + stacks, 'при закрытии стеки ушли на баланс');
+  assert.equal(final.reduce((s, r) => s + r.net, 0), 0, 'сумма итогов = 0');
+});

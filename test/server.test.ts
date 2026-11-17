@@ -135,7 +135,11 @@ test('сервер: аккаунты, друзья, игра, сохранени
 
   await t.test('регистрация и вход', async () => {
     const c = new Client();
-    assert.equal((await c.api('POST', '/api/register', { username: 'x1', password: 'secret123', inviteCode: 'wrong' })).status, 403);
+    const open = await c.api('POST', '/api/register', { username: 'xena', password: 'secret123' });
+    assert.equal(open.status, 200, 'регистрация без кода приглашения');
+    const meX = await c.api('GET', '/api/me');
+    assert.equal(meX.data.user.balance, 1_000_000, 'стартовый баланс — 1 млн');
+    assert.equal(meX.data.user.isAdmin, false, 'не первый аккаунт — не админ');
     assert.equal(
       (await c.api('POST', '/api/register', { username: 'alice', password: 'secret123', inviteCode: 'friends' })).status,
       409,
@@ -233,18 +237,87 @@ test('сервер: аккаунты, друзья, игра, сохранени
     await notActive.waitFor((m) => m.t === 'error' && /не ваш ход/i.test(m.message));
   });
 
-  await t.test('игрок встал — стек сохранился; вернулся без повторной покупки', async () => {
+  await t.test('баланс: бай-ин списывается, а когда встаёшь — фишки возвращаются на баланс', async () => {
+    const balanceBefore = (await bob.api('GET', '/api/me')).data.user.balance;
+    assert.equal(balanceBefore, 1_000_000 - 2000, 'бай-ин Боба списан с баланса');
+    const stackAtTable = bob.state.seats.find((x: any) => !x.empty && x.userId === bob.state.me.userId).stack;
     bob.send({ t: 'stand' });
     // если раздача идёт, Боб уйдёт после её окончания (его карты сбросятся на его ходу)
     const away = await playUntil([bob, alice, carol], (x) => x.me.seat === null);
-    const reserved = away.me.reservedStack;
-    assert.ok(reserved > 0);
-    bob.send({ t: 'sit', seat: 5 });
+    assert.equal(away.me.reservedStack, null, 'стек не «замораживается»');
+    const balanceAfter = (await bob.api('GET', '/api/me')).data.user.balance;
+    const row = away.stats.find((r: any) => r.userId === away.me.userId);
+    assert.equal(balanceAfter, balanceBefore + row.cashOut, 'всё, что было на столе, вернулось на баланс');
+    assert.ok(row.cashOut > 0 && Math.abs(row.cashOut - stackAtTable) <= 2000);
+
+    bob.messages = [];
+    bob.send({ t: 'sit', seat: 5, buyIn: 5_000_000 });
+    await bob.waitFor((m) => m.t === 'error' && /Не хватает фишек|Бай-ин должен быть/.test(m.message));
+    bob.send({ t: 'sit', seat: 5, buyIn: 1000 });
     const back = await bob.nextState((x) => x.me.seat === 5);
-    const seat = back.seats[5];
-    assert.equal(seat.stack, reserved);
-    const row = back.stats.find((r: any) => r.userId === back.me.userId);
-    assert.equal(row.buyIn, 2000, 'возвращение не считается новой покупкой');
+    assert.equal(back.seats[5].stack, 1000);
+    assert.equal(back.me.balance, balanceAfter - 1000);
+    assert.equal(back.stats.reduce((a: number, r: any) => a + r.net, 0), 0, 'сумма итогов за столом = 0');
+  });
+
+  await t.test('переводы фишек друзьям', async () => {
+    const aliceMe = (await alice.api('GET', '/api/me')).data.user;
+    const bobMe = (await bob.api('GET', '/api/me')).data.user;
+    const daveMe = (await dave.api('GET', '/api/me')).data.user;
+    const r = await alice.api('POST', '/api/wallet/transfer', { to: bobMe.id, amount: 25_000 });
+    assert.equal(r.status, 200);
+    assert.equal(r.data.balance, aliceMe.balance - 25_000);
+    assert.equal((await bob.api('GET', '/api/me')).data.user.balance, bobMe.balance + 25_000);
+    assert.equal((await alice.api('POST', '/api/wallet/transfer', { to: daveMe.id, amount: 10 })).status, 400, 'не другу нельзя');
+    assert.equal((await alice.api('POST', '/api/wallet/transfer', { to: bobMe.id, amount: -5 })).status, 400);
+    assert.equal((await alice.api('POST', '/api/wallet/transfer', { to: bobMe.id, amount: 999_999_999 })).status, 400, 'не хватает');
+    const hist = (await bob.api('GET', '/api/wallet')).data.history;
+    assert.equal(hist[0].incoming, true);
+    assert.equal(hist[0].amount, 25_000);
+    assert.equal(hist[0].other, 'Алиса');
+  });
+
+  await t.test('админ: первый аккаунт, начисляет фишки, закрывает чужие столы', async () => {
+    assert.equal((await alice.api('GET', '/api/me')).data.user.isAdmin, true, 'Алиса зарегистрировалась первой');
+    assert.equal((await bob.api('GET', '/api/admin/users')).status, 403);
+    const users = (await alice.api('GET', '/api/admin/users')).data.users;
+    const daveRow = users.find((u: any) => u.username === 'dave');
+    const g = await alice.api('POST', `/api/admin/users/${daveRow.id}/chips`, { amount: 500_000 });
+    assert.equal(g.data.balance, daveRow.balance + 500_000);
+    const minus = await alice.api('POST', `/api/admin/users/${daveRow.id}/chips`, { amount: -100_000_000 });
+    assert.equal(minus.data.balance, 0, 'списание не уводит баланс в минус');
+    // Админ закрывает стол Боба
+    const { table } = (await bob.api('POST', '/api/tables', { name: 'Стол Боба', stakeId: '10-20' })).data;
+    const admin = new Client();
+    admin.cookie = alice.cookie;
+    await admin.connect();
+    admin.send({ t: 'join', tableId: table.id });
+    await admin.waitFor((m) => m.t === 'state');
+    admin.send({ t: 'close' });
+    const closed = await admin.waitFor((m) => m.t === 'closed');
+    assert.equal(closed.stats.table.status, 'closed');
+    admin.close();
+  });
+
+  await t.test('предметы: кинуть в игрока за столом, все видят; в себя и слишком часто — нельзя', async () => {
+    const st = alice.state;
+    const bobId = bob.state.me.userId;
+    for (const c of [alice, bob, carol]) c.messages = [];
+    alice.send({ t: 'throw', to: bobId, item: 'tomato' });
+    for (const c of [alice, bob, carol]) {
+      const m = await c.waitFor((x) => x.t === 'throw');
+      assert.equal(m.to, bobId);
+      assert.equal(m.item, 'tomato');
+      assert.equal(m.from, st.me.userId);
+    }
+    const withGift = await carol.nextState((x) => x.seats.some((s: any) => !s.empty && s.userId === bobId && s.gift === 'tomato'));
+    assert.ok(withGift, 'помидор висит у места Боба');
+    alice.send({ t: 'throw', to: bobId, item: 'beer' });
+    await alice.waitFor((m) => m.t === 'error' && /часто/.test(m.message));
+    alice.send({ t: 'throw', to: st.me.userId, item: 'beer' });
+    await alice.waitFor((m) => m.t === 'error' && /себя/.test(m.message));
+    alice.send({ t: 'throw', to: bobId, item: 'bomb' });
+    await alice.waitFor((m) => m.t === 'error' && /Неизвестный предмет/.test(m.message));
   });
 
   await t.test('таймаут хода: авто-фолд/чек и пересадка в «отошёл»', async () => {

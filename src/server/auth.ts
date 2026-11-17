@@ -145,11 +145,9 @@ export function deleteSession(db: DB, token: string | undefined) {
 const attempts = new Map<string, { count: number; until: number }>();
 
 /** Не больше 10 неудачных попыток за 15 минут на пару «IP + логин». */
-export function checkRateLimit(key: string) {
+export function checkRateLimit(key: string, message = 'Слишком много попыток входа, попробуйте через 15 минут') {
   const a = attempts.get(key);
-  if (a && a.until > Date.now() && a.count >= 10) {
-    throw new AuthError('Слишком много попыток входа, попробуйте через 15 минут', 429);
-  }
+  if (a && a.until > Date.now() && a.count >= 10) throw new AuthError(message, 429);
 }
 
 export function recordFailure(key: string) {

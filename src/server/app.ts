@@ -21,12 +21,14 @@ import { acceptFriend, listFriends, removeFriend, requestFriend } from './friend
 import { HttpError, parseCookies, Router, sendJson, serveStatic, Ctx } from './http.js';
 import { TableCommand, TableManager, Subscriber, summary } from './tables.js';
 import { STAKES } from '../engine/stakes.js';
+import { adminGrant, getBalance, history, isAdmin, listUsers, START_BALANCE, transfer } from './wallet.js';
+import { THROW_ITEMS } from './tables.js';
 import { VARIANT_NAMES } from '../engine/hand.js';
 
 export interface AppOptions {
   dbPath: string;
   publicDir: string;
-  /** Если задан, регистрация возможна только с этим кодом приглашения. */
+  /** Больше не используется: регистрация открыта для всех. Оставлено для совместимости настроек. */
   registrationCode?: string;
   /** Ставить флаг Secure на cookie (когда сайт работает по HTTPS). */
   secureCookies?: boolean;
@@ -76,9 +78,10 @@ export function createApp(opts: AppOptions): App {
     'POST',
     '/api/register',
     async (ctx) => {
-      if (opts.registrationCode && ctx.body.inviteCode !== opts.registrationCode) {
-        throw new AuthError('Неверный код приглашения', 403);
-      }
+      // Регистрация открыта; от массовой регистрации защищает лимит на один IP-адрес
+      const regKey = `reg|${ctx.ip}`;
+      checkRateLimit(regKey, 'Слишком много регистраций с этого адреса, попробуйте через 15 минут');
+      recordFailure(regKey);
       const v = validateRegistration(ctx.body.username, ctx.body.password, ctx.body.displayName);
       const user = await createUser(db, v.username, v.password, v.displayName);
       setSessionCookie(ctx, createSession(db, user.id));
@@ -117,13 +120,22 @@ export function createApp(opts: AppOptions): App {
     { auth: false },
   );
 
-  router.add('GET', '/api/me', (ctx) => ({ user: ctx.user }), { auth: false });
+  router.add(
+    'GET',
+    '/api/me',
+    (ctx) => ({
+      user: ctx.user ? { ...ctx.user, balance: getBalance(db, ctx.user.id), isAdmin: isAdmin(db, ctx.user.id) } : null,
+    }),
+    { auth: false },
+  );
 
   router.add(
     'GET',
     '/api/config',
     () => ({
-      inviteRequired: !!opts.registrationCode,
+      inviteRequired: false,
+      startBalance: START_BALANCE,
+      throwItems: Object.entries(THROW_ITEMS).map(([id, v]) => ({ id, ...v })),
       stakes: STAKES,
       variants: Object.entries(VARIANT_NAMES).map(([id, name]) => ({ id, name })),
     }),
@@ -140,6 +152,25 @@ export function createApp(opts: AppOptions): App {
   router.add('POST', '/api/friends/request', (ctx) => ({ status: requestFriend(db, me(ctx).id, String(ctx.body.username ?? '')) }));
   router.add('POST', '/api/friends/:id/accept', (ctx) => acceptFriend(db, me(ctx).id, ctx.params.id));
   router.add('POST', '/api/friends/:id/remove', (ctx) => removeFriend(db, me(ctx).id, ctx.params.id));
+
+  // ---------- Баланс и переводы ----------
+
+  router.add('GET', '/api/wallet', (ctx) => ({ balance: getBalance(db, me(ctx).id), history: history(db, me(ctx).id) }));
+  router.add('POST', '/api/wallet/transfer', (ctx) => transfer(db, me(ctx).id, String(ctx.body.to ?? ''), ctx.body.amount));
+
+  // ---------- Админ ----------
+
+  const requireAdmin = (ctx: Ctx) => {
+    if (!isAdmin(db, me(ctx).id)) throw new HttpError(403, 'Только для админа');
+  };
+  router.add('GET', '/api/admin/users', (ctx) => {
+    requireAdmin(ctx);
+    return { users: listUsers(db) };
+  });
+  router.add('POST', '/api/admin/users/:id/chips', (ctx) => {
+    requireAdmin(ctx);
+    return adminGrant(db, me(ctx).id, ctx.params.id, ctx.body.amount);
+  });
 
   // ---------- Столы ----------
 

@@ -18,7 +18,6 @@ npm start         # сервер на http://localhost:3000
 | --- | --- | --- |
 | `PORT` | Порт сервера | `3000` |
 | `DB_PATH` | Файл базы данных | `data/poker.db` |
-| `REGISTRATION_CODE` | Код приглашения: без него зарегистрироваться нельзя | не задан (регистрация открыта) |
 | `COOKIE_SECURE` | `1`, когда сайт работает по HTTPS | выключено |
 | `TRUST_PROXY` | `1`, когда сервер стоит за nginx или другим прокси | выключено |
 
@@ -44,7 +43,7 @@ npm start         # сервер на http://localhost:3000
 
 | Метод и путь | Что делает |
 | --- | --- |
-| `POST /api/register` | `{username, password, displayName, inviteCode}` |
+| `POST /api/register` | `{username, password, displayName}` — регистрация открыта, стартовый баланс 1 000 000 |
 | `POST /api/login` / `POST /api/logout` | Вход и выход |
 | `GET /api/me` | Текущий пользователь |
 | `GET /api/config` | Уровни блайндов, виды покера, нужен ли код приглашения |
@@ -55,14 +54,20 @@ npm start         # сервер на http://localhost:3000
 | `GET /api/tables` | Лобби: открытые столы мои и друзей |
 | `POST /api/tables` | `{name, variant: NLH/PLO5, maxSeats, stakeId, minBuyInBB, maxBuyInBB, actionTime}` |
 | `GET /api/tables/:id/stats` | Статистика стола (и после закрытия) |
+| `GET /api/wallet` | Баланс и история переводов |
+| `POST /api/wallet/transfer` | `{to, amount}` — перевод фишек другу |
+| `GET /api/admin/users` | Админ: все игроки и их балансы |
+| `POST /api/admin/users/:id/chips` | Админ: `{amount}` — начислить (или списать, если меньше нуля) |
+
+Админ — самый первый зарегистрированный аккаунт. Он может закрыть любой стол и менять балансы.
 
 ### WebSocket `/ws`
 
 Клиент отправляет: `join {tableId}`, `sit {seat, buyIn?}`, `stand`, `sit_out`, `sit_in`,
-`add_chips {amount}`, `action {action: {type, amount?}}`, `close`.
+`add_chips {amount}`, `action {action: {type, amount?}}`, `close`, `throw {to, item}` (кинуть предмет в игрока).
 
 Сервер присылает `state` — состояние стола глазами этого игрока (чужие карты скрыты),
-`error {message}` и `closed {stats}`.
+`throw {from, to, item}`, `error {message}` и `closed {stats}`.
 
 **Интерфейс** (`public`) — чистый JavaScript без сборки:
 

@@ -25,9 +25,9 @@ export async function api(method, path, body) {
  * onState вызывается при каждом обновлении стола, onError — при ошибке хода.
  */
 export class TableSocket {
-  constructor(tableId, { onState, onError, onClosed, onStatus }) {
+  constructor(tableId, { onState, onError, onClosed, onStatus, onThrow }) {
     this.tableId = tableId;
-    this.handlers = { onState, onError, onClosed, onStatus };
+    this.handlers = { onState, onError, onClosed, onStatus, onThrow };
     this.stopped = false;
     this.retry = 0;
     this.open();
@@ -50,6 +50,8 @@ export class TableSocket {
           this.stop();
           this.handlers.onClosed?.(null, m.message);
         } else this.handlers.onError?.(m.message);
+      } else if (m.t === 'throw') {
+        this.handlers.onThrow?.(m);
       } else if (m.t === 'closed') {
         this.stop();
         this.handlers.onClosed?.(m.stats);

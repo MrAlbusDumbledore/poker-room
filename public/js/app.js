@@ -1,5 +1,5 @@
 import { api } from './api.js';
-import { h, mount, toast, fmt, plural } from './dom.js';
+import { h, mount, toast, fmt, plural, sheet } from './dom.js';
 import { tableScreen, statsTable } from './table.js';
 
 const root = document.getElementById('app');
@@ -14,6 +14,7 @@ const routes = [
   [/^#\/friends$/, friendsScreen, true],
   [/^#\/new$/, newTableScreen, true],
   [/^#\/profile$/, profileScreen, true],
+  [/^#\/admin$/, adminScreen, true],
   [/^#\/t\/([\w-]+)$/, (m) => tableScreen(root, m[1], state), true],
   [/^#\/t\/([\w-]+)\/stats$/, (m) => statsScreen(m[1]), true],
   [/^#?\/?$/, lobbyScreen, true],
@@ -53,6 +54,17 @@ function tabbar(active) {
     tab('#/friends', 'Друзья', 'friends', state.incoming || null),
     tab('#/profile', 'Профиль', 'profile'),
   );
+}
+
+function balancePill() {
+  return h('a.balance-pill.num', { href: '#/profile', title: 'Баланс фишек' }, fmt(state.user?.balance ?? 0));
+}
+
+async function refreshMe() {
+  try {
+    const me = await api('GET', '/api/me');
+    if (me.user) state.user = me.user;
+  } catch {}
 }
 
 async function refreshIncoming() {
@@ -125,9 +137,7 @@ function registerScreen() {
       field('Логин', h('input.input', { name: 'username', autocomplete: 'username', required: true, autocapitalize: 'none', pattern: '[a-zA-Z0-9_]{3,20}' }), 'Латиница, цифры и _, от 3 до 20 символов. По логину тебя найдут друзья.'),
       field('Имя за столом', h('input.input', { name: 'displayName', maxLength: 24, placeholder: 'Например, Миша' })),
       field('Пароль', h('input.input', { name: 'password', type: 'password', autocomplete: 'new-password', required: true, minLength: 6 }), 'Минимум 6 символов'),
-      state.config?.inviteRequired
-        ? field('Код приглашения', h('input.input', { name: 'inviteCode', required: true, autocapitalize: 'none' }), 'Спроси у того, кто позвал тебя играть')
-        : null,
+      h('p.hint', {}, `После регистрации на балансе будет ${fmt(state.config?.startBalance ?? 1_000_000)} фишек.`),
     ],
     onSubmit: async (d) => afterAuth((await api('POST', '/api/register', d)).user),
     footer: ['Уже есть аккаунт? ', h('a', { href: '#/login' }, 'Войти')],
@@ -145,13 +155,15 @@ async function lobbyScreen() {
     h(
       'main.page',
       {},
-      h('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px' } }, h('h1', {}, 'Столы'), h('a.btn.primary.small', { href: '#/new' }, 'Новый стол')),
+      h('div.page-head', {}, h('h1', {}, 'Столы'), balancePill(), h('a.btn.primary.small', { href: '#/new' }, 'Новый стол')),
       list,
     ),
     tabbar('lobby'),
   );
   const load = async () => {
     try {
+      await refreshMe();
+      document.querySelector('.page-head .balance-pill')?.replaceWith(balancePill());
       const { tables } = await api('GET', '/api/tables');
       if (!tables.length) {
         mount(
@@ -299,7 +311,9 @@ async function friendsScreen() {
       h('h2', {}, f.friends.length ? `Друзья: ${f.friends.length}` : 'Друзья'),
       f.friends.length
         ? h('ul.list', {}, f.friends.map((u) =>
-            person(u, h('button.btn.ghost.small', { 'aria-label': `Удалить ${u.displayName} из друзей`, onclick: () => confirm(`Удалить ${u.displayName} из друзей?`) && act(() => api('POST', `/api/friends/${u.id}/remove`, {})) }, 'Удалить')),
+            person(u,
+              h('button.btn.small', { onclick: () => openTransfer(u, load) }, 'Перевести'),
+              h('button.btn.ghost.small', { 'aria-label': `Удалить ${u.displayName} из друзей`, onclick: () => confirm(`Удалить ${u.displayName} из друзей?`) && act(() => api('POST', `/api/friends/${u.id}/remove`, {})) }, 'Удалить')),
           ))
         : h('div.empty', {}, 'Найди друзей по логину или имени через поиск выше.'),
       f.outgoing.length
@@ -359,17 +373,52 @@ async function friendsScreen() {
   mount(root, h('main.page', {}, h('h1', {}, 'Друзья'), input, results, lists), tabbar('friends'));
 }
 
+// ---------- Перевод фишек другу ----------
+
+function openTransfer(friend, onDone) {
+  let value = 10_000;
+  const err = h('p.error', { role: 'alert' });
+  const amount = h('input.input.num', { type: 'number', inputMode: 'numeric', min: 1, value, oninput: () => (value = Number(amount.value)) });
+  const presets = h('div.presets', {}, [10_000, 50_000, 100_000, 500_000].map((v) =>
+    h('button.btn', { type: 'button', onclick: () => { value = v; amount.value = v; } }, fmt(v))));
+  const go = h('button.btn.primary.block', {
+    onclick: async () => {
+      err.textContent = '';
+      go.disabled = true;
+      try {
+        const r = await api('POST', '/api/wallet/transfer', { to: friend.id, amount: Math.round(value) });
+        state.user.balance = r.balance;
+        close();
+        toast(`Переведено ${fmt(Math.round(value))} фишек: ${friend.displayName}`);
+        onDone?.();
+      } catch (e) {
+        err.textContent = e.message;
+      } finally {
+        go.disabled = false;
+      }
+    },
+  }, 'Перевести');
+  const close = sheet(`Перевести фишки: ${friend.displayName}`, amount, h('div', { style: { marginTop: '10px' } }, presets),
+    h('p.hint', {}, `На балансе ${fmt(state.user.balance)}. Фишки сразу появятся у друга.`), err, h('div.actions', {}, go));
+}
+
 // ---------- Профиль ----------
 
-function profileScreen() {
+async function profileScreen() {
+  await refreshMe();
+  const hist = h('div', {}, h('p.hint', {}, 'Загружаю…'));
   mount(
     root,
     h(
       'main.page',
       {},
       h('h1', {}, state.user.displayName),
-      h('p.lede', {}, '@' + state.user.username),
-      h('p.hint', {}, 'Друзья находят тебя по логину. Чтобы позвать человека за стол, открой стол и отправь ему ссылку из меню.'),
+      h('p.lede', {}, '@' + state.user.username, state.user.isAdmin ? ', админ' : ''),
+      h('div.wallet-card', {}, h('span', {}, 'Баланс'), h('b.num', {}, fmt(state.user.balance))),
+      state.user.isAdmin ? h('a.btn.block', { href: '#/admin', style: { marginTop: '12px' } }, 'Управление игроками') : null,
+      h('h2', {}, 'Переводы'),
+      hist,
+      h('p.hint', { style: { marginTop: '16px' } }, 'Друзья находят тебя по логину. Чтобы позвать человека за стол, открой стол и отправь ему ссылку из меню.'),
       h(
         'button.btn.block',
         {
@@ -385,6 +434,63 @@ function profileScreen() {
     ),
     tabbar('profile'),
   );
+  try {
+    const w = await api('GET', '/api/wallet');
+    mount(
+      hist,
+      w.history.length
+        ? h('ul.list', {}, w.history.map((x) =>
+            h('li', {},
+              h('div.grow', {},
+                h('div.title', {}, x.kind === 'admin' ? (x.incoming ? 'Изменение от админа' : `Админ, игрок: ${x.other}`) : x.incoming ? `Получено, отправитель: ${x.other}` : `Отправлено, получатель: ${x.other}`),
+                h('div.sub', {}, new Date(x.at).toLocaleString('ru-RU', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })),
+              ),
+              h('b.num', { class: x.incoming === x.amount > 0 ? 'pos' : 'neg' }, (x.incoming === x.amount > 0 ? '+' : '−') + fmt(Math.abs(x.amount))),
+            )))
+        : h('div.empty', {}, 'Переводов пока не было. Перевести фишки можно во вкладке «Друзья».'),
+    );
+  } catch (e) {
+    mount(hist, h('p.error', {}, e.message));
+  }
+}
+
+// ---------- Админ ----------
+
+async function adminScreen() {
+  await refreshMe();
+  if (!state.user.isAdmin) {
+    mount(root, h('main.page', {}, h('h1', {}, 'Нет доступа'), h('p.lede', {}, 'Этот раздел только для админа.')), tabbar('profile'));
+    return;
+  }
+  const list = h('div', {}, h('p.hint', {}, 'Загружаю…'));
+  mount(root, h('main.page', {}, h('h1', {}, 'Игроки'), h('p.lede', {}, 'Можно начислить или списать фишки. Закрыть любой стол можно из меню стола.'), list), tabbar('profile'));
+  const load = async () => {
+    const { users } = await api('GET', '/api/admin/users');
+    mount(list, h('ul.list', {}, users.map((u) =>
+      h('li', {},
+        h('div.grow', {}, h('div.title', {}, u.displayName), h('div.sub', {}, '@' + u.username)),
+        h('b.num', {}, fmt(u.balance)),
+        h('button.btn.small', { onclick: () => grant(u) }, 'Изменить'),
+      ))));
+  };
+  const grant = (u) => {
+    let value = 100_000;
+    const err = h('p.error', { role: 'alert' });
+    const amount = h('input.input.num', { type: 'number', inputMode: 'numeric', value, oninput: () => (value = Number(amount.value)) });
+    const run = async (sign) => {
+      try {
+        await api('POST', `/api/admin/users/${u.id}/chips`, { amount: sign * Math.abs(Math.round(value)) });
+        close();
+        toast(sign > 0 ? `Начислено ${fmt(Math.abs(value))}: ${u.displayName}` : `Списано ${fmt(Math.abs(value))}: ${u.displayName}`);
+        await load();
+      } catch (e) {
+        err.textContent = e.message;
+      }
+    };
+    const close = sheet(`Фишки: ${u.displayName}`, amount, h('p.hint', {}, `Сейчас на балансе ${fmt(u.balance)}.`), err,
+      h('div.actions', {}, h('button.btn.primary.block', { onclick: () => run(1) }, 'Начислить'), h('button.btn.block.danger', { onclick: () => run(-1) }, 'Списать')));
+  };
+  await load().catch((e) => mount(list, h('p.error', {}, e.message)));
 }
 
 // ---------- Итоги закрытого стола ----------

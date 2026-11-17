@@ -24,7 +24,9 @@ export interface LedgerRow {
   buyIn: number;
   /** Фишки сейчас: за столом или «замороженные» после ухода. */
   stack: number;
-  /** Итог: stack − buyIn. */
+  /** Сколько игрок забрал со стола, вставая (в режиме с балансом). */
+  cashOut: number;
+  /** Итог: stack + cashOut − buyIn. */
   net: number;
   handsPlayed: number;
   status: 'playing' | 'sitting_out' | 'away';
@@ -39,8 +41,8 @@ export interface RevealedDeck extends ShuffledDeck {
 /**
  * Кэш-стол. Правила:
  * - игрок садится с бай-ином в пределах [minBuyIn, maxBuyIn];
- * - если игрок встаёт, его стек сохраняется за ним до закрытия стола,
- *   и при возвращении он садится ровно с этим стеком (без повторной покупки);
+ * - если игрок встаёт: при заданном onCashOut его стек сразу уходит на баланс игрока
+ *   (сервер зачисляет его), иначе — сохраняется за ним до закрытия стола;
  * - докупка возможна между раздачами, но не выше maxBuyIn;
  * - статистика (кто сколько закупил и выиграл) ведётся до закрытия стола.
  */
@@ -49,7 +51,9 @@ export class CashTable {
   readonly seats: (SeatState | null)[];
   /** Стеки игроков, которые встали из-за стола. */
   readonly reserved = new Map<string, number>();
-  private readonly ledger = new Map<string, { buyIn: number; handsPlayed: number }>();
+  private readonly ledger = new Map<string, { buyIn: number; handsPlayed: number; cashOut: number }>();
+  /** Вызывается, когда игрок забирает фишки со стола (встал или стол закрыт). */
+  onCashOut: ((userId: string, amount: number) => void) | null = null;
 
   buttonSeat: number | null = null;
   hand: Hand | null = null;
@@ -76,12 +80,20 @@ export class CashTable {
    */
   static restore(
     config: TableConfig,
-    rows: { userId: string; buyIn: number; stack: number; handsPlayed: number; seat?: number | null; sittingOut?: boolean }[],
+    rows: {
+      userId: string;
+      buyIn: number;
+      stack: number;
+      handsPlayed: number;
+      seat?: number | null;
+      sittingOut?: boolean;
+      cashOut?: number;
+    }[],
     handNumber = 0,
   ): CashTable {
     const t = new CashTable(config);
     for (const r of rows) {
-      t.ledger.set(r.userId, { buyIn: r.buyIn, handsPlayed: r.handsPlayed });
+      t.ledger.set(r.userId, { buyIn: r.buyIn, handsPlayed: r.handsPlayed, cashOut: r.cashOut ?? 0 });
       const seat = r.seat ?? null;
       if (seat !== null && seat >= 0 && seat < t.seats.length && !t.seats[seat] && r.stack > 0) {
         t.seats[seat] = { userId: r.userId, stack: r.stack, sittingOut: !!r.sittingOut, leaveAfterHand: false };
@@ -179,8 +191,30 @@ export class CashTable {
     const s = this.seats[i]!;
     // Если игрок уже сбросил карты в идущей раздаче, его итоговый стек — в раздаче.
     const inHand = this.handInProgress ? this.hand!.player(s.userId) : undefined;
-    this.reserved.set(s.userId, inHand ? inHand.stack : s.stack);
+    const stack = inHand ? inHand.stack : s.stack;
     this.seats[i] = null;
+    if (this.onCashOut) {
+      if (stack > 0) {
+        this.ledger.get(s.userId)!.cashOut += stack;
+        this.onCashOut(s.userId, stack);
+      }
+    } else {
+      this.reserved.set(s.userId, stack);
+    }
+  }
+
+  /**
+   * Забрать на баланс «замороженные» стеки (остались от времени, когда баланса не было).
+   * Работает только в режиме с onCashOut.
+   */
+  cashOutReserved() {
+    if (!this.onCashOut) return;
+    for (const [userId, stack] of [...this.reserved]) {
+      this.reserved.delete(userId);
+      if (stack <= 0) continue;
+      this.ledger.get(userId)!.cashOut += stack;
+      this.onCashOut(userId, stack);
+    }
   }
 
   private eligibleSeats(): number[] {
@@ -261,7 +295,7 @@ export class CashTable {
   }
 
   private addToLedger(userId: string, amount: number) {
-    const row = this.ledger.get(userId) ?? { buyIn: 0, handsPlayed: 0 };
+    const row = this.ledger.get(userId) ?? { buyIn: 0, handsPlayed: 0, cashOut: 0 };
     row.buyIn += amount;
     this.ledger.set(userId, row);
   }
@@ -279,7 +313,8 @@ export class CashTable {
         userId,
         buyIn: row.buyIn,
         stack,
-        net: stack - row.buyIn,
+        cashOut: row.cashOut,
+        net: stack + row.cashOut - row.buyIn,
         handsPlayed: row.handsPlayed,
         status: s ? (s.sittingOut ? 'sitting_out' : 'playing') : 'away',
         seat: seat >= 0 ? seat : null,
@@ -290,6 +325,11 @@ export class CashTable {
   /** Закрыть стол и получить итоговую таблицу. */
   close(): LedgerRow[] {
     if (this.handInProgress) throw new HandError('Дождитесь окончания раздачи');
+    // В режиме с балансом все, кто сидел, забирают фишки
+    if (this.onCashOut) {
+      this.seats.forEach((s, i) => s && this.vacate(i));
+      this.cashOutReserved();
+    }
     this.closed = true;
     return this.stats();
   }

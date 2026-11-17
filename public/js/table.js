@@ -16,15 +16,27 @@ export function statsTable(players, { live = false } = {}) {
         h(
           'tr',
           {},
-          h('td', {}, p.displayName, live && p.status === 'away' ? h('div.away', {}, 'встал из-за стола') : null),
+          h('td', {}, p.displayName, live && p.status === 'away' ? h('div.away', {}, 'встал, фишки на балансе') : null),
           h('td.num', {}, fmt(p.buyIn)),
-          h('td.num', {}, fmt(p.stack)),
+          h('td.num', {}, fmt(p.stack + (p.cashOut ?? 0))),
           h('td.num', { class: p.net > 0 ? 'pos' : p.net < 0 ? 'neg' : '' }, (p.net > 0 ? '+' : '') + fmt(p.net)),
           h('td.num', {}, fmt(p.handsPlayed)),
         ),
       ),
     ),
   );
+}
+
+/** Цвет аватара по id игрока — у каждого свой и всегда одинаковый. */
+function hue(id) {
+  let x = 0;
+  for (const ch of id) x = (x * 31 + ch.charCodeAt(0)) >>> 0;
+  return String(x % 360);
+}
+
+function initials(name) {
+  const parts = name.trim().split(/\s+/);
+  return ((parts[0]?.[0] ?? '') + (parts[1]?.[0] ?? '')).toUpperCase() || '?';
 }
 
 /** Положение места на овале: своё место всегда внизу по центру. */
@@ -117,6 +129,12 @@ export function tableScreen(root, tableId, app) {
       }
     },
     onStatus: (s) => s === 'offline' && st && toast('Связь потеряна, переподключаюсь…', true),
+    onThrow: (m) => {
+      const who = name(m.from);
+      flyThrow(m);
+      const it = throwItems[m.item];
+      if (m.to === st?.me.userId) toast(`${it?.emoji ?? ''} ${it?.name ?? 'Подарок'} для тебя, отправитель: ${who}`);
+    },
   });
 
   const now = () => Date.now() + clockOffset;
@@ -144,6 +162,7 @@ export function tableScreen(root, tableId, app) {
       top,
       h('a.icon-btn', { href: '#/', 'aria-label': 'К списку столов' }, '‹'),
       h('div.name', {}, h('b', {}, t.name), h('small', {}, `${t.variant === 'PLO5' ? 'Омаха PL5' : 'Холдем NL'}, ${fmt(t.smallBlind)}/${fmt(t.bigBlind)}`, t.closing ? ', закрывается' : '')),
+      h('span.balance-pill.num', { title: 'Баланс' }, fmt(me.balance)),
       h('button.icon-btn', { onclick: openStats, 'aria-label': 'Статистика стола' }, '≡'),
       h('button.icon-btn', { onclick: openMenu, 'aria-label': 'Меню стола' }, '⋯'),
     );
@@ -207,8 +226,24 @@ export function tableScreen(root, tableId, app) {
       els.push(
         h(
           'div.seat',
-          { class: [active && 'active', folded && live && 'folded', ((s.sittingOut && !running) || s.leaving) && 'away', isMe && 'me'].filter(Boolean).join(' '), style: pos },
+          {
+            class: [active && 'active', folded && live && 'folded', ((s.sittingOut && !running) || s.leaving) && 'away', isMe && 'me'].filter(Boolean).join(' '),
+            style: pos,
+            dataset: { uid: s.userId },
+          },
           mini,
+          h(
+            'button.avatar',
+            {
+              style: { '--hue': hue(s.userId) },
+              dataset: active ? { timer: '1' } : {},
+              disabled: isMe,
+              onclick: isMe ? null : () => openThrow(s),
+              'aria-label': isMe ? s.displayName : `Кинуть что-нибудь в игрока ${s.displayName}`,
+            },
+            initials(s.displayName),
+            s.gift && throwItems[s.gift] ? h('span.gift', { 'aria-hidden': 'true' }, throwItems[s.gift].emoji) : null,
+          ),
           h(
             'div.plate',
             {},
@@ -216,7 +251,6 @@ export function tableScreen(root, tableId, app) {
             // Во время раскладки показываем стек до раздачи банка, чтобы не выдать победителя
             h('div.stack.num', {}, fmt(!anim.results && result ? s.stack - (result.collected[s.userId] ?? 0) : s.stack)),
             tag ? h('div.tag', {}, tag) : null,
-            active ? h('div.timer', { dataset: { timer: '1' } }) : null,
           ),
           res,
         ),
@@ -255,11 +289,9 @@ export function tableScreen(root, tableId, app) {
     if (!mySeat) {
       parts.push(
         h('div.waiting', {},
-          me.reservedStack
-            ? `Твой стек ${fmt(me.reservedStack)} сохранён. Выбери место, чтобы вернуться.`
-            : st.table.closing
-              ? 'Стол закрывается.'
-              : 'Выбери свободное место, чтобы сесть за стол.'),
+          st.table.closing
+            ? 'Стол закрывается.'
+            : `Выбери свободное место, чтобы сесть. На балансе ${fmt(me.balance)}.`),
       );
       mount(dock, parts);
       return;
@@ -311,7 +343,7 @@ export function tableScreen(root, tableId, app) {
         oninput: () => setValue(Number(amount.value), false),
       });
       const range = h('input', { type: 'range', min, max, step: Math.max(1, Math.round(st.table.bigBlind / 2)), value: raise.value, 'aria-label': 'Сумма ставки', oninput: () => setValue(Number(range.value)) });
-      const confirm = h('button.btn.primary.block', { style: { marginTop: '10px' }, onclick: () => {
+      const confirm = h('button.btn.act-raise.block', { style: { marginTop: '10px' }, onclick: () => {
         const v = Math.round(raise.value);
         if (!(v >= min && v <= max)) return toast(`Сумма должна быть от ${fmt(min)} до ${fmt(max)}`, true);
         send({ t: 'action', action: v === maxTotal ? { type: 'allin' } : { type: legal.isBet ? 'bet' : 'raise', amount: v } });
@@ -345,18 +377,18 @@ export function tableScreen(root, tableId, app) {
     }
 
     const callBtn = legal.canCheck
-      ? h('button.btn', { onclick: () => send({ t: 'action', action: { type: 'check' } }) }, 'Чек')
-      : h('button.btn.stack', { onclick: () => send({ t: 'action', action: { type: 'call' } }) },
+      ? h('button.btn.act-call', { onclick: () => send({ t: 'action', action: { type: 'check' } }) }, 'Чек')
+      : h('button.btn.act-call.stack', { onclick: () => send({ t: 'action', action: { type: 'call' } }) },
           legal.callAmount >= myP.stack ? 'Олл-ин' : 'Колл', h('small.num', {}, fmt(legal.callAmount)));
     const raiseBtn = legal.canRaise
       ? raise.open
         ? h('button.btn', { onclick: () => { raise.open = false; draw(); } }, 'Скрыть')
-        : h('button.btn.primary', { onclick: () => { raise.open = true; raise.value = legal.minRaiseTo; draw(); } }, legal.isBet ? 'Ставка' : 'Рейз')
-      : h('button.btn', { disabled: true }, 'Рейз');
+        : h('button.btn.act-raise', { onclick: () => { raise.open = true; raise.value = legal.minRaiseTo; draw(); } }, legal.isBet ? 'Ставка' : 'Рейз')
+      : h('button.btn.act-raise', { disabled: true }, 'Рейз');
 
     out.push(
       h('div.actions-row', {},
-        h('button.btn.danger', { onclick: () => send({ t: 'action', action: { type: 'fold' } }) }, 'Фолд'),
+        h('button.btn.act-fold', { onclick: () => send({ t: 'action', action: { type: 'fold' } }) }, 'Фолд'),
         callBtn,
         raiseBtn,
       ),
@@ -370,10 +402,10 @@ export function tableScreen(root, tableId, app) {
     const loop = () => {
       if (!st) return;
       const t = now();
-      const bar = arena.querySelector('[data-timer]');
-      if (bar && st.actionDeadline) {
+      const ring = arena.querySelector('[data-timer]');
+      if (ring && st.actionDeadline) {
         const left = Math.max(0, st.actionDeadline - t);
-        bar.style.width = `${(left / (st.table.actionTime * 1000)) * 100}%`;
+        ring.style.setProperty('--p', `${(left / (st.table.actionTime * 1000)) * 100}%`);
       }
       const text = statusText(t);
       for (const el of document.querySelectorAll('[data-status]')) if (el.textContent !== text) el.textContent = text;
@@ -402,11 +434,16 @@ export function tableScreen(root, tableId, app) {
   // ---------- Действия и листы ----------
 
   function trySit(seat) {
-    if (st.me.reservedStack) return send({ t: 'sit', seat });
-    const { minBuyIn: min, maxBuyIn: max, bigBlind: bb } = st.table;
+    const { minBuyIn: min, bigBlind: bb } = st.table;
+    const balance = st.me.balance;
+    const max = Math.min(st.table.maxBuyIn, balance);
+    if (balance < min) {
+      sheet('Не хватает фишек', h('p.hint', {}, `Минимальный бай-ин за этим столом — ${fmt(min)}, а на балансе ${fmt(balance)}. Попроси друга перевести фишки или выбери стол с блайндами поменьше.`));
+      return;
+    }
     let value = Math.min(max, Math.max(min, bb * 100));
     const amount = h('input.input.num', { type: 'number', inputMode: 'numeric', min, max, value, oninput: () => sync(Number(amount.value), false) });
-    const range = h('input', { type: 'range', min, max, step: bb, value, style: { width: '100%', margin: '14px 0', accentColor: 'var(--brass)' }, oninput: () => sync(Number(range.value)) });
+    const range = h('input', { type: 'range', min, max, step: bb, value, style: { width: '100%', margin: '14px 0', accentColor: 'var(--gold)' }, oninput: () => sync(Number(range.value)) });
     const go = h('button.btn.primary.block', { onclick: () => { close(); send({ t: 'sit', seat, buyIn: value }); } });
     function sync(v, setInput = true) {
       value = Math.min(max, Math.max(min, Math.round(v) || min));
@@ -415,21 +452,67 @@ export function tableScreen(root, tableId, app) {
       go.textContent = `Сесть с ${fmt(value)}`;
     }
     sync(value);
-    const close = sheet('Сколько фишек взять за стол', amount, range, h('p.hint', {}, `От ${fmt(min)} до ${fmt(max)}. Если встанешь из-за стола, стек сохранится до его закрытия.`), h('div.actions', {}, go));
+    const close = sheet('Сколько фишек взять за стол', amount, range, h('p.hint', {}, `От ${fmt(min)} до ${fmt(max)}. На балансе ${fmt(balance)}. Когда встанешь из-за стола, фишки вернутся на баланс.`), h('div.actions', {}, go));
   }
 
   function openRebuy() {
     const seat = st.seats[st.me.seat];
-    const max = st.table.maxBuyIn - seat.stack;
-    if (max <= 0) return toast('У тебя уже максимальный стек для этого стола');
+    const max = Math.min(st.table.maxBuyIn - seat.stack, st.me.balance);
+    if (st.table.maxBuyIn - seat.stack <= 0) return toast('У тебя уже максимальный стек для этого стола');
+    if (max <= 0) return toast('На балансе нет фишек для докупки', true);
     let value = Math.min(max, st.table.minBuyIn);
     const amount = h('input.input.num', { type: 'number', inputMode: 'numeric', min: 1, max, value, oninput: () => (value = Number(amount.value)) });
     const close = sheet(
       'Докупить фишки',
       amount,
-      h('p.hint', {}, `Сейчас у тебя ${fmt(seat.stack)}. Можно докупить до ${fmt(max)}. Если идёт раздача с твоим участием, докупка будет доступна после неё.`),
+      h('p.hint', {}, `Сейчас у тебя ${fmt(seat.stack)}, на балансе ${fmt(st.me.balance)}. Можно докупить до ${fmt(max)}. Если идёт раздача с твоим участием, докупка будет доступна после неё.`),
       h('div.actions', {}, h('button.btn.primary.block', { onclick: () => { close(); send({ t: 'add_chips', amount: Math.round(value) }); if (seat.sittingOut) setTimeout(() => send({ t: 'sit_in' }), 150); } }, 'Докупить')),
     );
+  }
+
+  // ---------- Предметы: кинуть в игрока ----------
+
+  const throwItems = Object.fromEntries((app.config?.throwItems ?? []).map((x) => [x.id, x]));
+
+  function openThrow(seat) {
+    const items = Object.values(throwItems);
+    const close = sheet(
+      `Кинуть в игрока ${seat.displayName}`,
+      h(
+        'div.throw-grid',
+        {},
+        items.map((it) =>
+          h('button.throw-item', { onclick: () => { close(); send({ t: 'throw', to: seat.userId, item: it.id }); }, 'aria-label': it.name },
+            h('span.e', { 'aria-hidden': 'true' }, it.emoji),
+            h('span', {}, it.name),
+          ),
+        ),
+      ),
+      h('p.hint', {}, 'Бесплатно. Предмет полетит в игрока, и все за столом это увидят.'),
+    );
+  }
+
+  /** Анимация: предмет летит от того, кто кинул, к тому, в кого кинули. */
+  function flyThrow({ from, to, item }) {
+    const it = throwItems[item];
+    if (!it) return;
+    const box = arena.getBoundingClientRect();
+    const center = (uid) => {
+      const el = arena.querySelector(`.seat[data-uid="${CSS.escape(uid)}"] .avatar`);
+      if (!el) return null;
+      const r = el.getBoundingClientRect();
+      return { x: r.left - box.left + r.width / 2, y: r.top - box.top + r.height / 2 };
+    };
+    const start = center(from) ?? { x: box.width / 2, y: box.height + 20 };
+    const end = center(to);
+    if (!end) return;
+    const el = h('span.flying', { 'aria-hidden': 'true', style: { left: `${start.x}px`, top: `${start.y}px` } }, it.emoji);
+    arena.append(el);
+    el.getBoundingClientRect(); // запускаем переход
+    el.style.transform = `translate(${end.x - start.x}px, ${end.y - start.y}px) rotate(540deg)`;
+    setTimeout(() => el.classList.add('hit'), 650);
+    setTimeout(() => el.remove(), 1800);
+    if (to === st.me.userId) navigator.vibrate?.([30, 40, 30]);
   }
 
   function openStats() {
@@ -461,7 +544,7 @@ export function tableScreen(root, tableId, app) {
       items.push(seat.sittingOut ? item('Вернуться в игру', () => send({ t: 'sit_in' })) : item('Отойти на время', () => send({ t: 'sit_out' })));
       items.push(item('Встать из-за стола', () => send({ t: 'stand' })));
     }
-    if (me.isOwner && !st.table.closing) {
+    if ((me.isOwner || me.isAdmin) && !st.table.closing) {
       items.push(item('Закрыть стол', () => {
         if (confirm(st.handInProgress ? 'Закрыть стол после текущей раздачи? Итоги сохранятся.' : 'Закрыть стол? Итоги сохранятся.')) send({ t: 'close' });
       }, 'danger'));
