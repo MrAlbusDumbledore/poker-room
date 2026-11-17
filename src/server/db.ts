@@ -86,6 +86,25 @@ function migrate(db: DB) {
   // Место за столом и статус «отошёл» — чтобы после перезапуска сервера все остались на своих местах.
   if (!cols.has('seat')) db.exec('ALTER TABLE table_ledger ADD COLUMN seat INTEGER');
   if (!cols.has('sitting_out')) db.exec('ALTER TABLE table_ledger ADD COLUMN sitting_out INTEGER NOT NULL DEFAULT 0');
+  // Сколько игрок забрал со стола на баланс
+  if (!cols.has('cash_out')) db.exec('ALTER TABLE table_ledger ADD COLUMN cash_out INTEGER NOT NULL DEFAULT 0');
+
+  // Баланс фишек: всем, включая уже зарегистрированных, — стартовый миллион
+  const userCols = new Set((db.prepare('PRAGMA table_info(users)').all() as { name: string }[]).map((c) => c.name));
+  if (!userCols.has('balance')) db.exec('ALTER TABLE users ADD COLUMN balance INTEGER NOT NULL DEFAULT 1000000');
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS transfers (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      from_id     TEXT NOT NULL,
+      to_id       TEXT NOT NULL,
+      amount      INTEGER NOT NULL,
+      kind        TEXT NOT NULL,
+      created_at  INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS transfers_from ON transfers(from_id);
+    CREATE INDEX IF NOT EXISTS transfers_to ON transfers(to_id);
+  `);
 }
 
 /** Выполнить функцию в транзакции. */

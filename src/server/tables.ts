@@ -5,6 +5,22 @@ import { stakeById } from '../engine/stakes.js';
 import { AuthError, getUsers, User } from './auth.js';
 import { DB, tx } from './db.js';
 import { friendIds } from './friends.js';
+import { credit, debit, getBalance, isAdmin } from './wallet.js';
+
+/** Предметы, которые можно кинуть в игрока за столом (бесплатно). */
+export const THROW_ITEMS = {
+  beer: { emoji: '🍺', name: 'Пиво' },
+  rose: { emoji: '🌹', name: 'Роза' },
+  tomato: { emoji: '🍅', name: 'Помидор' },
+  egg: { emoji: '🥚', name: 'Яйцо' },
+  kiss: { emoji: '💋', name: 'Поцелуй' },
+  cake: { emoji: '🎂', name: 'Торт' },
+  whisky: { emoji: '🥃', name: 'Виски' },
+  fire: { emoji: '🔥', name: 'Огонь' },
+} as const;
+export type ThrowItem = keyof typeof THROW_ITEMS;
+/** Не чаще одного броска раз в столько миллисекунд от одного игрока. */
+export const THROW_COOLDOWN_MS = 2500;
 
 export interface TableRow {
   id: string;
@@ -49,7 +65,8 @@ export type TableCommand =
   | { t: 'sit_in' }
   | { t: 'add_chips'; amount: number }
   | { t: 'action'; action: ActionInput }
-  | { t: 'close' };
+  | { t: 'close' }
+  | { t: 'throw'; to: string; item: ThrowItem };
 
 /**
  * Темп раскладки стола после олл-ина. Сервер отправляет эти значения в интерфейс,
@@ -94,6 +111,10 @@ interface LiveTable {
   loadedAt: number;
   /** Когда игрок последний раз был на связи (если сейчас отключён). */
   lastSeen: Map<string, number>;
+  /** Последний предмет, брошенный в игрока, — показывается у его места. */
+  gifts: Map<string, { item: ThrowItem; from: string; at: number }>;
+  /** Когда игрок последний раз что-то кидал (защита от спама). */
+  lastThrow: Map<string, number>;
 }
 
 /** Игрок, отключившийся дольше этого, перед новой раздачей пересаживается в «отошёл». */
@@ -209,20 +230,35 @@ export class TableManager {
     if (!row) throw new AuthError('Стол не найден', 404);
     const lt = this.live.get(id);
     const rows = lt
-      ? lt.table.stats().map((s) => ({ userId: s.userId, buyIn: s.buyIn, stack: s.stack, handsPlayed: s.handsPlayed, status: s.status }))
+      ? lt.table.stats().map((s) => ({
+          userId: s.userId,
+          buyIn: s.buyIn,
+          stack: s.stack,
+          cashOut: s.cashOut,
+          handsPlayed: s.handsPlayed,
+          status: s.status,
+        }))
       : (
           this.db.prepare('SELECT * FROM table_ledger WHERE table_id = ?').all(id) as {
             user_id: string;
             buy_in: number;
             stack: number;
+            cash_out: number;
             hands_played: number;
           }[]
-        ).map((r) => ({ userId: r.user_id, buyIn: r.buy_in, stack: r.stack, handsPlayed: r.hands_played, status: 'away' as const }));
+        ).map((r) => ({
+          userId: r.user_id,
+          buyIn: r.buy_in,
+          stack: r.stack,
+          cashOut: r.cash_out,
+          handsPlayed: r.hands_played,
+          status: 'away' as const,
+        }));
     const users = getUsers(this.db, rows.map((r) => r.userId));
     return {
       table: summary(row),
       players: rows
-        .map((r) => ({ ...r, net: r.stack - r.buyIn, displayName: users.get(r.userId)?.displayName ?? '?' }))
+        .map((r) => ({ ...r, net: r.stack + r.cashOut - r.buyIn, displayName: users.get(r.userId)?.displayName ?? '?' }))
         .sort((a, b) => b.net - a.net),
     };
   }
@@ -242,6 +278,7 @@ export class TableManager {
       hands_played: number;
       seat: number | null;
       sitting_out: number;
+      cash_out: number;
     }[];
     const table = CashTable.restore(
       configOf(row),
@@ -252,9 +289,14 @@ export class TableManager {
         handsPlayed: r.hands_played,
         seat: r.seat,
         sittingOut: !!r.sitting_out,
+        cashOut: r.cash_out,
       })),
       row.hand_number,
     );
+    // Фишки, которые игрок забирает со стола, зачисляются на его баланс
+    table.onCashOut = (userId, amount) => credit(this.db, userId, amount);
+    // «Замороженные» стеки со времён до появления баланса — сразу на баланс
+    table.cashOutReserved();
     const lt: LiveTable = {
       row,
       table,
@@ -268,8 +310,11 @@ export class TableManager {
       closing: false,
       loadedAt: Date.now(),
       lastSeen: new Map(),
+      gifts: new Map(),
+      lastThrow: new Map(),
     };
     this.live.set(id, lt);
+    this.saveLedger(lt);
     return lt;
   }
 
@@ -310,10 +355,17 @@ export class TableManager {
     const lt = this.load(id);
     const t = lt.table;
     switch (cmd.t) {
-      case 'sit':
+      case 'sit': {
         if (lt.closing) throw new HandError('Стол закрывается');
-        t.sit(user.id, Number(cmd.seat), cmd.buyIn === undefined ? undefined : Number(cmd.buyIn));
+        const buyIn = Number(cmd.buyIn);
+        if (!Number.isInteger(buyIn) || buyIn <= 0) throw new HandError('Укажите, сколько фишек взять за стол');
+        if (getBalance(this.db, user.id) < buyIn) {
+          throw new HandError(`Не хватает фишек на балансе: у вас ${getBalance(this.db, user.id).toLocaleString('ru-RU')}`);
+        }
+        t.sit(user.id, Number(cmd.seat), buyIn);
+        debit(this.db, user.id, buyIn);
         break;
+      }
       case 'stand':
         t.leave(user.id);
         break;
@@ -323,15 +375,36 @@ export class TableManager {
       case 'sit_in':
         t.sitIn(user.id);
         break;
-      case 'add_chips':
-        t.addChips(user.id, Number(cmd.amount));
+      case 'add_chips': {
+        const amount = Number(cmd.amount);
+        if (Number.isInteger(amount) && amount > 0 && getBalance(this.db, user.id) < amount) {
+          throw new HandError(`Не хватает фишек на балансе: у вас ${getBalance(this.db, user.id).toLocaleString('ru-RU')}`);
+        }
+        t.addChips(user.id, amount);
+        debit(this.db, user.id, amount);
         break;
+      }
+      case 'throw': {
+        const item = cmd.item;
+        if (!Object.hasOwn(THROW_ITEMS, item)) throw new HandError('Неизвестный предмет');
+        const target = String(cmd.to);
+        if (target === user.id) throw new HandError('В себя кидать нельзя');
+        if (t.seatOf(target) < 0) throw new HandError('Этот игрок не сидит за столом');
+        const now = Date.now();
+        if (now - (lt.lastThrow.get(user.id) ?? 0) < THROW_COOLDOWN_MS) throw new HandError('Не так часто 🙂');
+        lt.lastThrow.set(user.id, now);
+        lt.gifts.set(target, { item, from: user.id, at: now });
+        for (const s of lt.subs) s.send({ t: 'throw', from: user.id, to: target, item });
+        break;
+      }
       case 'action':
         if (!cmd.action || typeof cmd.action !== 'object') throw new HandError('Нет действия');
         t.act(user.id, { type: cmd.action.type, amount: cmd.action.amount === undefined ? undefined : Number(cmd.action.amount) });
         break;
       case 'close':
-        if (user.id !== lt.row.owner_id) throw new HandError('Закрыть стол может только его создатель');
+        if (user.id !== lt.row.owner_id && !isAdmin(this.db, user.id)) {
+          throw new HandError('Закрыть стол может только его создатель или админ');
+        }
         lt.closing = true;
         break;
       default:
@@ -429,13 +502,14 @@ export class TableManager {
     const stats = lt.table.stats();
     tx(this.db, () => {
       const up = this.db.prepare(
-        `INSERT INTO table_ledger (table_id, user_id, buy_in, stack, hands_played, seat, sitting_out)
-         VALUES (?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO table_ledger (table_id, user_id, buy_in, stack, hands_played, seat, sitting_out, cash_out)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT (table_id, user_id) DO UPDATE SET buy_in = excluded.buy_in, stack = excluded.stack,
-         hands_played = excluded.hands_played, seat = excluded.seat, sitting_out = excluded.sitting_out`,
+         hands_played = excluded.hands_played, seat = excluded.seat, sitting_out = excluded.sitting_out,
+         cash_out = excluded.cash_out`,
       );
       for (const s of stats) {
-        up.run(lt.row.id, s.userId, s.buyIn, s.stack, s.handsPlayed, s.seat, s.status === 'sitting_out' ? 1 : 0);
+        up.run(lt.row.id, s.userId, s.buyIn, s.stack, s.handsPlayed, s.seat, s.status === 'sitting_out' ? 1 : 0, s.cashOut);
       }
       this.db.prepare('UPDATE poker_tables SET hand_number = ? WHERE id = ?').run(lt.table.handNumber, lt.row.id);
     });
@@ -486,6 +560,8 @@ export class TableManager {
         seat: mySeat >= 0 ? mySeat : null,
         reservedStack: t.reserved.get(viewerId) ?? null,
         isOwner: viewerId === lt.row.owner_id,
+        isAdmin: isAdmin(this.db, viewerId),
+        balance: getBalance(this.db, viewerId),
       },
       seats: t.seats.map((s, i) => {
         if (!s) return { seat: i, empty: true as const };
@@ -499,6 +575,7 @@ export class TableManager {
           sittingOut: s.sittingOut,
           leaving: s.leaveAfterHand,
           online: online.has(s.userId),
+          gift: lt.gifts.get(s.userId)?.item ?? null,
         };
       }),
       handNumber: t.handNumber,
